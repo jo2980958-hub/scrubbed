@@ -67,3 +67,25 @@ def aws():
         db.set_resource(res)
         cds._clients.clear()
         yield res
+
+
+# Shared fixtures (available once the data-model accessors are implemented). The
+# data-model module builds create_staff/create_patient/create_case to accept these fields.
+@pytest.fixture
+def staff():
+    return db.create_staff({"name": "Dr Ada Lovelace", "role": "surgeon", "email": "ada@hospital.test",
+                            "whatsappNumber": "+233200000001", "hospitalId": "hosp-1"})
+
+
+@pytest.fixture
+def patient():
+    return db.create_patient({"name": "John Doe", "whatsappNumber": "+233200000009",
+                              "hospitalId": "hosp-1", "balancePence": 0})
+
+
+@pytest.fixture
+def case(staff, patient):
+    return db.create_case({"hospitalId": "hosp-1", "surgeonId": staff["staffId"],
+                           "patientId": patient["patientId"], "procedure": "Laparoscopic cholecystectomy",
+                           "theatre": "Theatre 2", "scheduledAt": "2026-10-09T14:00:00Z",
+                           "team": [staff["staffId"]]})

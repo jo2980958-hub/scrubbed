@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Scrubbed - perioperative coordination agent (WhatsApp + Voice + SES + Bedrock)
+
+Parameters:
+  SendMode: {Type: String, Default: dry, AllowedValues: [dry, live]}
+  Brand: {Type: String, Default: Scrubbed}
+  SesSender: {Type: String, Default: billing@brownshift.com}
+  WhatsAppTopicArn:
+    Type: String
+    Default: arn:aws:sns:us-east-1:854924711083:brownshift-whatsapp-events
+  VoiceOriginationNumberId: {Type: String, Default: ""}
+  SonnetProfileId: {Type: String, Default: us.anthropic.claude-sonnet-4-5-20250929-v1:0}
+  HaikuProfileId: {Type: String, Default: us.anthropic.claude-haiku-4-5-20251001-v1:0}
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 90
+    MemorySize: 512
+    Architectures: [x86_64]
+    Layers: [!Ref CommonLayer]
+    Environment:
+      Variables:
+        SEND_MODE: !Ref SendMode
+        BRAND: !Ref Brand
+        SES_SENDER: !Ref SesSender
+        VOICE_ORIGINATION_NUMBER_ID: !Ref VoiceOriginationNumberId
+        MEDIA_BUCKET: !Ref MediaBucket
+        COGNITO_USER_POOL_ID: !Ref UserPool
+
+Resources:
+  # ── Lambda layer (shared code) ──────────────────────────────────────────────
+  CommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: scrubbed-common
+      ContentUri: ../services/layer
+      CompatibleRuntimes: [python3.12]
+    Metadata:
+      BuildMethod: python3.12
+
+  # ── DynamoDB ────────────────────────────────────────────────────────────────
+  StaffTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-staff
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: staffId, AttributeType: S}
+        - {AttributeName: email, AttributeType: S}
+        - {AttributeName: whatsappNumber, AttributeType: S}
+      KeySchema: [{AttributeName: staffId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byEmail, KeySchema: [{AttributeName: email, KeyType: HASH}], Projection: {ProjectionType: ALL}}
+        - {IndexName: byWhatsapp, KeySchema: [{AttributeName: whatsappNumber, KeyType: HASH}], Projection: {ProjectionType: ALL}}
+
+  CasesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-cases
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: caseId, AttributeType: S}
+        - {AttributeName: hospitalId, AttributeType: S}
+        - {AttributeName: surgeonId, AttributeType: S}
+        - {AttributeName: scheduledAt, AttributeType: S}
+      KeySchema: [{AttributeName: caseId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byHospital, KeySchema: [{AttributeName: hospitalId, KeyType: HASH}, {AttributeName: scheduledAt, KeyType: RANGE}], Projection: {ProjectionType: ALL}}
+        - {IndexName: bySurgeon, KeySchema: [{AttributeName: surgeonId, KeyType: HASH}, {AttributeName: scheduledAt, KeyType: RANGE}], Projection: {ProjectionType: ALL}}
+
+  PatientsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-patients
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: patientId, AttributeType: S}
+        - {AttributeName: whatsappNumber, AttributeType: S}
+      KeySchema: [{AttributeName: patientId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byWhatsapp, KeySchema: [{AttributeName: whatsappNumber, KeyType: HASH}], Projection: {ProjectionType: ALL}}
+
+  TraysTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-trays
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: caseId, AttributeType: S}]
+      KeySchema: [{AttributeName: caseId, KeyType: HASH}]
+
+  ReadinessTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-readiness
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: caseId, AttributeType: S}]
+      KeySchema: [{AttributeName: caseId, KeyType: HASH}]
+
+  PagesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-pages
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: pageId, AttributeType: S}
+        - {AttributeName: sk, AttributeType: S}
+        - {AttributeName: caseId, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: pageId, KeyType: HASH}, {AttributeName: sk, KeyType: RANGE}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byCase, KeySchema: [{AttributeName: caseId, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}], Projection: {ProjectionType: ALL}}
+
+  FormsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-forms
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: formId, AttributeType: S}
+        - {AttributeName: caseId, AttributeType: S}
+        - {AttributeName: createdAt, AttributeType: S}
+      KeySchema: [{AttributeName: formId, KeyType: HASH}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byCase, KeySchema: [{AttributeName: caseId, KeyType: HASH}, {AttributeName: createdAt, KeyType: RANGE}], Projection: {ProjectionType: ALL}}
+
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-events
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: caseId, AttributeType: S}
+        - {AttributeName: "createdAt#seq", AttributeType: S}
+      KeySchema: [{AttributeName: caseId, KeyType: HASH}, {AttributeName: "createdAt#seq", KeyType: RANGE}]
+
+  ConversationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-conversations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - {AttributeName: whatsappNumber, AttributeType: S}
+        - {AttributeName: "createdAt#messageId", AttributeType: S}
+        - {AttributeName: messageId, AttributeType: S}
+      KeySchema: [{AttributeName: whatsappNumber, KeyType: HASH}, {AttributeName: "createdAt#messageId", KeyType: RANGE}]
+      GlobalSecondaryIndexes:
+        - {IndexName: byMessageId, KeySchema: [{AttributeName: messageId, KeyType: HASH}], Projection: {ProjectionType: ALL}}
+
+  WaSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: scrubbed-wa-sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [{AttributeName: waNumber, AttributeType: S}]
+      KeySchema: [{AttributeName: waNumber, KeyType: HASH}]
+
+  # ── S3 + CloudFront (tray photos, generated audio/PDFs, the dashboard) ───────
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub scrubbed-media-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+      BucketEncryption: {ServerSideEncryptionConfiguration: [{ServerSideEncryptionByDefault: {SSEAlgorithm: AES256}}]}
+      LifecycleConfiguration:
+        Rules: [{Id: expire-media, Status: Enabled, Prefix: inbound/, ExpirationInDays: 90}]
+
+  WebBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub scrubbed-web-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration: {BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true}
+
+  WebOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub scrubbed-web-oac-${AWS::AccountId}
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Scrubbed dashboard
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: web
+            DomainName: !GetAtt WebBucket.RegionalDomainName
+            S3OriginConfig: {OriginAccessIdentity: ""}
+            OriginAccessControlId: !GetAtt WebOriginAccessControl.Id
+        DefaultCacheBehavior:
+          TargetOriginId: web
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - {ErrorCode: 403, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 0}
+          - {ErrorCode: 404, ResponseCode: 200, ResponsePagePath: /index.html, ErrorCachingMinTTL: 0}
+
+  WebBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: s3:GetObject
+            Resource: !Sub ${WebBucket.Arn}/*
+            Condition: {StringEquals: {AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebDistribution}"}}
+
+  # ── Cognito (dashboard sign-in) ─────────────────────────────────────────────
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: scrubbed-staff
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
+      Policies:
+        PasswordPolicy: {MinimumLength: 10, RequireLowercase: true, RequireUppercase: true, RequireNumbers: true, RequireSymbols: false}
+      AccountRecoverySetting: {RecoveryMechanisms: [{Name: verified_email, Priority: 1}]}
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: scrubbed-dashboard
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows: [ALLOW_USER_PASSWORD_AUTH, ALLOW_USER_SRP_AUTH]
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins: ["*"]
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, PATCH, PUT, DELETE, OPTIONS]
+      Auth:
+        Authorizers:
+          CognitoAuth:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              audience: [!Ref UserPoolClient]
+              issuer: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}
+        DefaultAuthorizer: CognitoAuth
+
+  # ── Lambdas ─────────────────────────────────────────────────────────────────
+  WebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: scrubbed-webhook
+      CodeUri: ../services/functions
+      Handler: webhook.handler
+      Description: WhatsApp inbound (SNS) - staff app, patient flow, tray photos, acknowledgements
+      Events:
+        WhatsApp: {Type: SNS, Properties: {Topic: !Ref WhatsAppTopicArn}}
+      Policies:
+        - Statement: [{Effect: Allow, Action: [bedrock:InvokeModel], Resource: ["*"]}]
+        - Statement: [{Effect: Allow, Action: ["social-messaging:SendWhatsAppMessage", "social-messaging:GetWhatsAppMessageMedia", "social-messaging:PostWhatsAppMessageMedia"], Resource: !Sub "arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*"}]
+        - Statement: [{Effect: Allow, Action: ["ses:SendEmail", "ses:SendRawEmail"], Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"}]
+        - Statement: [{Effect: Allow, Action: ["sms-voice:SendVoiceMessage"], Resource: "*"}]
+        - Statement: [{Effect: Allow, Action: ["polly:SynthesizeSpeech"], Resource: "*"}]
+        - DynamoDBCrudPolicy: {TableName: !Ref StaffTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref CasesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PatientsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref TraysTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ReadinessTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PagesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref FormsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref EventsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ConversationsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref WaSessionsTable}
+        - S3CrudPolicy: {BucketName: !Ref MediaBucket}
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: scrubbed-api
+      CodeUri: ../services/functions
+      Handler: api.handler
+      Timeout: 29
+      Description: Dashboard API (HTTP API + Cognito)
+      Events:
+        Proxy: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /{proxy+}, Method: ANY}}
+        Preflight: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /{proxy+}, Method: OPTIONS, Auth: {Authorizer: NONE}}}
+      Policies:
+        - Statement: [{Effect: Allow, Action: ["social-messaging:SendWhatsAppMessage", "social-messaging:PostWhatsAppMessageMedia"], Resource: !Sub "arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*"}]
+        - Statement: [{Effect: Allow, Action: ["ses:SendEmail", "ses:SendRawEmail"], Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"}]
+        - Statement: [{Effect: Allow, Action: ["polly:SynthesizeSpeech", "sms-voice:SendVoiceMessage"], Resource: "*"}]
+        - Statement: [{Effect: Allow, Action: [bedrock:InvokeModel], Resource: ["*"]}]
+        - DynamoDBCrudPolicy: {TableName: !Ref StaffTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref CasesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PatientsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref TraysTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ReadinessTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PagesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref FormsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref EventsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ConversationsTable}
+        - S3CrudPolicy: {BucketName: !Ref MediaBucket}
+
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: scrubbed-scheduler
+      CodeUri: ../services/functions
+      Handler: scheduler.handler
+      Description: Every 5 min - escalate unacknowledged pages, not-ready sweep, due follow-ups
+      Events:
+        Tick: {Type: Schedule, Properties: {Schedule: "rate(5 minutes)"}}
+      Policies:
+        - Statement: [{Effect: Allow, Action: [bedrock:InvokeModel], Resource: ["*"]}]
+        - Statement: [{Effect: Allow, Action: ["social-messaging:SendWhatsAppMessage", "social-messaging:PostWhatsAppMessageMedia"], Resource: !Sub "arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*"}]
+        - Statement: [{Effect: Allow, Action: ["ses:SendEmail", "ses:SendRawEmail"], Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"}]
+        - Statement: [{Effect: Allow, Action: ["sms-voice:SendVoiceMessage", "polly:SynthesizeSpeech"], Resource: "*"}]
+        - DynamoDBCrudPolicy: {TableName: !Ref StaffTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref CasesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PatientsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ReadinessTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref PagesTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref EventsTable}
+        - DynamoDBCrudPolicy: {TableName: !Ref ConversationsTable}
+        - S3CrudPolicy: {BucketName: !Ref MediaBucket}
+
+Outputs:
+  ApiUrl: {Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com"}
+  WebUrl: {Value: !Sub "https://${WebDistribution.DomainName}", Description: CloudFront URL for the dashboard}
+  WebBucket: {Value: !Ref WebBucket}
+  WebDistributionId: {Value: !Ref WebDistribution}
+  MediaBucket: {Value: !Ref MediaBucket}
+  UserPoolId: {Value: !Ref UserPool}
+  CognitoClientId: {Value: !Ref UserPoolClient}

@@ -13,6 +13,7 @@ from datetime import date
 
 from common import config
 from common.pdf import _esc
+from safety.engine import CHECKLIST, readiness as _readiness
 
 # ── page geometry (A4, points, origin bottom-left) ──────────────────────────
 _PAGE_W, _PAGE_H, _MARGIN = 595, 842, 56
@@ -28,6 +29,12 @@ _INK = (0.129, 0.149, 0.173)        # near-black body text
 _MUTED = (0.42, 0.45, 0.50)         # muted grey labels
 _RULE = (0.80, 0.82, 0.85)          # light-grey rule lines
 _BOXBG = (0.957, 0.969, 0.980)      # very light totals box fill
+
+# clinical palette for the Scrubbed documents (colours named in words, not numbers)
+_TEAL = (0.063, 0.431, 0.451)       # deep clinical teal accent (section rules, tick boxes)
+_ALERT = (0.776, 0.157, 0.157)      # clear red, reserved for flags and escalations
+_AMBER = (0.839, 0.510, 0.000)      # warm amber, a medium caution
+_OK = (0.129, 0.498, 0.329)         # calm green, an all-clear
 
 
 def _char_factor(bold: bool) -> float:
@@ -126,26 +133,341 @@ def _header_band(c: _Canvas, name: str, subtitle: str) -> float:
     return band_bottom - 32
 
 
+def _clock(value) -> str:
+    """A scheduled time as a readable string. '2026-10-09T14:00:00Z' -> '09 Oct 2026, 14:00'."""
+    s = str(value or "").strip()
+    if not s:
+        return "To be confirmed"
+    try:
+        d, t = s.replace("Z", "").split("T")
+        y, m, day = d.split("-")
+        hhmm = ":".join(t.split(":")[:2])
+        months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        return f"{int(day):02d} {months[int(m) - 1]} {y}, {hhmm}"
+    except (ValueError, IndexError):
+        return s
+
+
+def _hhmm(value) -> str:
+    """Just the time of day from an ISO timestamp, for a dense table."""
+    s = str(value or "").strip()
+    if "T" in s:
+        return ":".join(s.split("T")[1].replace("Z", "").split(":")[:2]) or "--:--"
+    return s or "--:--"
+
+
+def _readiness_summary(case: dict) -> tuple:
+    """A (state, line) summary for the brief. state is True ready, False not ready,
+    None not yet recorded. Reads an already-scored readiness dict, or scores the raw
+    item map with the safety engine, so the brief always agrees with the spine."""
+    r = case.get("readiness")
+    if not isinstance(r, dict):
+        status = case.get("readinessStatus")
+        r = _readiness(status) if isinstance(status, dict) else None
+    if not isinstance(r, dict):
+        return None, "Readiness not yet recorded."
+    done, total = r.get("doneCount"), r.get("total")
+    head = f"{done} of {total} items complete" if done is not None and total else "recorded"
+    if r.get("isReady"):
+        return True, f"Ready. {head}."
+    outstanding = r.get("outstandingRequired") or r.get("outstanding") or []
+    line = f"Not ready. {head}."
+    if outstanding:
+        line += " Outstanding: " + "; ".join(str(o) for o in outstanding) + "."
+    return False, line
+
+
 def case_brief_pdf(case: dict, team: list, patient: dict) -> bytes:
     """A one-page case brief: patient, procedure, theatre, time, the team and roles,
     readiness summary. For the surgeon."""
-    raise NotImplementedError
+    c = _Canvas()
+    body_top = _header_band(c, config.BRAND, "CASE BRIEF")
+    c.line(_MARGIN, body_top + 10, _RIGHT, body_top + 10, _TEAL, width=2.0)
+    y = body_top - 4
+
+    def ensure(space: float = 44) -> None:
+        nonlocal y
+        if y - space < _BOTTOM:
+            c.new_page()
+            y = _PAGE_H - _MARGIN
+
+    # Procedure and the key facts
+    c.text(_MARGIN, y, _trunc(case.get("procedure", ""), _RIGHT - _MARGIN, 16, True),
+           size=16, bold=True, color=_INK)
+    y -= 24
+    for label, val in (("Theatre", case.get("theatre")),
+                       ("Scheduled", _clock(case.get("scheduledAt"))),
+                       ("Patient", patient.get("name"))):
+        if val:
+            c.text(_MARGIN, y, label, size=10, color=_MUTED)
+            c.text(_MARGIN + 90, y, str(val), size=11, bold=True, color=_INK)
+            y -= 17
+    y -= 12
+
+    # Theatre team table
+    x_role = 320
+    c.text(_MARGIN, y, "THEATRE TEAM", size=9, bold=True, color=_MUTED)
+    y -= 8
+    c.line(_MARGIN, y, _RIGHT, y, _RULE)
+    y -= 16
+    c.text(_MARGIN, y, "Name", size=10, bold=True, color=_MUTED)
+    c.text(x_role, y, "Role", size=10, bold=True, color=_MUTED)
+    y -= 8
+    c.line(_MARGIN, y, _RIGHT, y, _RULE)
+    y -= 18
+    if not team:
+        c.text(_MARGIN, y, "No team assigned.", size=10, color=_MUTED)
+        y -= 20
+    else:
+        for member in team:
+            ensure()
+            c.text(_MARGIN, y, _trunc(str(member.get("name", "")), x_role - _MARGIN - 12, 11),
+                   size=11, color=_INK)
+            c.text(x_role, y, _trunc(str(member.get("role", "")), _RIGHT - x_role, 11),
+                   size=11, color=_MUTED)
+            c.line(_MARGIN, y - 8, _RIGHT, y - 8, _RULE)
+            y -= 22
+    y -= 10
+
+    # Readiness summary line
+    ensure()
+    c.text(_MARGIN, y, "READINESS", size=9, bold=True, color=_MUTED)
+    y -= 18
+    state, line = _readiness_summary(case)
+    rcolor = _OK if state else (_ALERT if state is False else _MUTED)
+    for ln in _wrap(line, _RIGHT - _MARGIN, 11):
+        ensure(16)
+        c.text(_MARGIN, y, ln, size=11, bold=True, color=rcolor)
+        y -= 16
+    y -= 14
+
+    # Pre-op checklist (WHO sign-in then time-out) as a tick list
+    ensure()
+    c.text(_MARGIN, y, "PRE-OP CHECKLIST (WHO SIGN-IN AND TIME-OUT)", size=9, bold=True, color=_MUTED)
+    y -= 8
+    c.line(_MARGIN, y, _RIGHT, y, _TEAL, width=1.5)
+    y -= 20
+    box, tx = 9, _MARGIN + 18
+    for item in CHECKLIST["sign_in"] + CHECKLIST["time_out"]:
+        ensure(24)
+        by = y - 1
+        c.line(_MARGIN, by, _MARGIN + box, by, _MUTED)
+        c.line(_MARGIN, by + box, _MARGIN + box, by + box, _MUTED)
+        c.line(_MARGIN, by, _MARGIN, by + box, _MUTED)
+        c.line(_MARGIN + box, by, _MARGIN + box, by + box, _MUTED)
+        for i, ln in enumerate(_wrap(item, _RIGHT - tx, 10)):
+            if i:
+                ensure(16)
+            c.text(tx, y, ln, size=10, color=_INK)
+            y -= 14
+        y -= 4
+
+    return c.build()
 
 
 def worklist_pdf(hospital: dict, cases: list) -> bytes:
     """The coordinator worklist: today's cases, theatre, time, readiness and risk."""
-    raise NotImplementedError
+    c = _Canvas()
+    body_top = _header_band(c, hospital.get("name", config.BRAND), "THEATRE WORKLIST")
+    c.text_right(_RIGHT, body_top, f"Date: {date.today().isoformat()}", size=10, color=_MUTED)
+    c.line(_MARGIN, body_top - 8, _RIGHT, body_top - 8, _TEAL, width=2.0)
+
+    x_theatre, x_time, x_patient, x_proc = _MARGIN, 120, 172, 288
+    x_ready_r, x_risk_r = 470, _RIGHT
+
+    def header_row(top: float) -> float:
+        c.line(_MARGIN, top, _RIGHT, top, _RULE)
+        c.text(x_theatre, top - 16, "Theatre", size=9, bold=True, color=_MUTED)
+        c.text(x_time, top - 16, "Time", size=9, bold=True, color=_MUTED)
+        c.text(x_patient, top - 16, "Patient", size=9, bold=True, color=_MUTED)
+        c.text(x_proc, top - 16, "Procedure", size=9, bold=True, color=_MUTED)
+        c.text_right(x_ready_r, top - 16, "Ready", size=9, bold=True, color=_MUTED)
+        c.text_right(x_risk_r, top - 16, "Risk", size=9, bold=True, color=_MUTED)
+        c.line(_MARGIN, top - 24, _RIGHT, top - 24, _RULE)
+        return top - 42
+
+    y = body_top - 28
+    if not cases:
+        c.text(_MARGIN, y - 6, "No cases.", size=12, color=_MUTED)
+        return c.build()
+
+    y = header_row(y)
+    for case in cases:
+        if y < _BOTTOM + 40:
+            c.new_page()
+            y = header_row(_PAGE_H - _MARGIN)
+
+        patient = (case.get("patientName")
+                   or (case.get("patient") or {}).get("name") or "")
+        ready = case.get("readiness") if isinstance(case.get("readiness"), dict) else None
+        if ready and ready.get("total"):
+            ready_txt = f"{ready.get('doneCount', 0)}/{ready['total']}"
+        elif case.get("readinessScore") is not None:
+            ready_txt = str(case["readinessScore"])
+        else:
+            ready_txt = "-"
+        risk = str(case.get("risk") or case.get("cancellationRisk") or "-")
+        rcolor = {"high": _ALERT, "medium": _AMBER, "low": _OK}.get(risk.lower(), _MUTED)
+
+        c.text(x_theatre, y, _trunc(str(case.get("theatre", "")), x_time - x_theatre - 6, 10), size=10, color=_INK)
+        c.text(x_time, y, _hhmm(case.get("scheduledAt")), size=10, color=_INK)
+        c.text(x_patient, y, _trunc(str(patient), x_proc - x_patient - 6, 10), size=10, color=_INK)
+        c.text(x_proc, y, _trunc(str(case.get("procedure", "")), x_ready_r - 30 - x_proc, 10), size=10, color=_INK)
+        c.text_right(x_ready_r, y, ready_txt, size=10, color=_INK)
+        c.text_right(x_risk_r, y, risk, size=10, bold=True, color=rcolor)
+        c.line(_MARGIN, y - 10, _RIGHT, y - 10, _RULE)
+        y -= 24
+
+    return c.build()
 
 
 def instrument_audit_pdf(case: dict, before: dict, after: dict, diff: dict) -> bytes:
     """The instrument second-count audit: the before and after catalogues and the diff,
     with the 'second count, manual WHO count is authoritative' note."""
-    raise NotImplementedError
+    c = _Canvas()
+    body_top = _header_band(c, config.BRAND, "INSTRUMENT SECOND COUNT")
+    c.line(_MARGIN, body_top + 10, _RIGHT, body_top + 10, _TEAL, width=2.0)
+    y = body_top - 6
+
+    c.text(_MARGIN, y, _trunc(case.get("procedure", ""), _RIGHT - _MARGIN, 14, True),
+           size=14, bold=True, color=_INK)
+    y -= 20
+    bits = [b for b in (case.get("theatre"), _clock(case.get("scheduledAt"))) if b]
+    if bits:
+        c.text(_MARGIN, y, "   ".join(str(b) for b in bits), size=10, color=_MUTED)
+        y -= 22
+
+    # Two catalogues, side by side
+    mid, gap = 300, 16
+    lx, lx_r = _MARGIN, mid - gap
+    rx, rx_r = mid + gap, _RIGHT
+
+    def col_head(label: str, x: float, x_r: float) -> None:
+        c.text(x, y, label, size=9, bold=True, color=_MUTED)
+        c.text_right(x_r, y, "Count", size=9, bold=True, color=_MUTED)
+
+    col_head("BEFORE", lx, lx_r)
+    col_head("AFTER", rx, rx_r)
+    y -= 6
+    c.line(lx, y, lx_r, y, _RULE)
+    c.line(rx, y, rx_r, y, _RULE)
+    y -= 16
+
+    before_rows = sorted(before.items())
+    after_rows = sorted(after.items())
+    for i in range(max(len(before_rows), len(after_rows))):
+        if y < _BOTTOM + 90:
+            c.new_page()
+            y = _PAGE_H - _MARGIN
+        if i < len(before_rows):
+            name, count = before_rows[i]
+            c.text(lx, y, _trunc(str(name), lx_r - lx - 30, 10), size=10, color=_INK)
+            c.text_right(lx_r, y, str(count), size=10, color=_INK)
+        if i < len(after_rows):
+            name, count = after_rows[i]
+            c.text(rx, y, _trunc(str(name), rx_r - rx - 30, 10), size=10, color=_INK)
+            c.text_right(rx_r, y, str(count), size=10, color=_INK)
+        y -= 16
+    y -= 14
+
+    # Flags
+    if y < _BOTTOM + 110:
+        c.new_page()
+        y = _PAGE_H - _MARGIN
+    c.text(_MARGIN, y, "FLAGS", size=9, bold=True, color=_MUTED)
+    y -= 8
+    c.line(_MARGIN, y, _RIGHT, y, _RULE)
+    y -= 18
+    if diff.get("ok"):
+        c.text(_MARGIN, y, "No discrepancies flagged.", size=11, bold=True, color=_OK)
+        y -= 18
+    else:
+        for flag in diff.get("flags", []):
+            msg = str(flag.get("message", "")) if isinstance(flag, dict) else str(flag)
+            for j, ln in enumerate(_wrap(msg, _RIGHT - _MARGIN - 14, 11, True)):
+                if y < _BOTTOM + 70:
+                    c.new_page()
+                    y = _PAGE_H - _MARGIN
+                if j == 0:
+                    c.rect(_MARGIN, y - 1, 8, 9, _ALERT)
+                c.text(_MARGIN + 14, y, ln, size=11, bold=True, color=_ALERT)
+                y -= 15
+            y -= 3
+
+    # Footer note — the one claim the product is careful about
+    note = "A second check only. The manual WHO surgical count is the authority."
+    lines = _wrap(note, _RIGHT - _MARGIN, 9, True)
+    fy = _BOTTOM + 14 + (len(lines) - 1) * 12
+    c.line(_MARGIN, fy + 16, _RIGHT, fy + 16, _RULE)
+    for ln in lines:
+        c.text(_MARGIN, fy, ln, size=9, bold=True, color=_INK)
+        fy -= 12
+
+    return c.build()
 
 
 def missed_form_pdf(case: dict, staff: dict, kind: str) -> bytes:
     """A form sent to a team member who missed a page, to fill and upload back."""
-    raise NotImplementedError
+    c = _Canvas()
+    body_top = _header_band(c, config.BRAND, "TEAM FOLLOW-UP FORM")
+    c.line(_MARGIN, body_top + 10, _RIGHT, body_top + 10, _TEAL, width=2.0)
+    y = body_top - 6
+
+    reason = {
+        "page_missed": ("We paged you about the case below and have not had a reply. "
+                        "Please tell us your status and send a photo of this form back on WhatsApp."),
+        "handover": ("Please confirm your handover for the case below, then send a photo of "
+                     "this form back on WhatsApp."),
+    }.get(kind, ("Please complete the form below for the case named here and send a photo "
+                 "back on WhatsApp."))
+    for ln in _wrap(reason, _RIGHT - _MARGIN, 10):
+        c.text(_MARGIN, y, ln, size=10, color=_MUTED)
+        y -= 14
+    y -= 10
+
+    # The case
+    c.text(_MARGIN, y, _trunc(case.get("procedure", ""), _RIGHT - _MARGIN, 13, True),
+           size=13, bold=True, color=_INK)
+    y -= 19
+    for label, val in (("Theatre", case.get("theatre")),
+                       ("Scheduled", _clock(case.get("scheduledAt")))):
+        if val:
+            c.text(_MARGIN, y, label, size=10, color=_MUTED)
+            c.text(_MARGIN + 90, y, str(val), size=11, bold=True, color=_INK)
+            y -= 16
+    y -= 6
+
+    # Who this is for
+    c.text(_MARGIN, y, "Team member", size=10, color=_MUTED)
+    who = str(staff.get("name", ""))
+    if staff.get("role"):
+        who += f"  ({staff['role']})"
+    c.text(_MARGIN + 90, y, who, size=11, bold=True, color=_INK)
+    y -= 24
+    c.line(_MARGIN, y, _RIGHT, y, _TEAL, width=1.5)
+    y -= 26
+
+    # Labelled blank lines to complete
+    fields = (
+        ("Can you attend? (yes / no)", 1),
+        ("If no, who is covering?", 1),
+        ("Notes", 2),
+        ("Signature", 1),
+        ("Time", 1),
+    )
+    for label, rows in fields:
+        if y < _BOTTOM + 40 + rows * 26:
+            c.new_page()
+            y = _PAGE_H - _MARGIN
+        c.text(_MARGIN, y, label, size=10, bold=True, color=_INK)
+        y -= 22
+        for _ in range(rows):
+            c.line(_MARGIN, y, _RIGHT, y, _RULE)
+            y -= 26
+        y -= 8
+
+    return c.build()
 
 
 def invoice_pdf(business: dict, invoice: dict) -> bytes:
