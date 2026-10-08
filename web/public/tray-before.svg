@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 400" width="640" height="400" role="img" aria-label="Instrument tray laid out before the case: six artery forceps, two scalpel handles, scissors and swabs.">
+  <defs>
+    <linearGradient id="mat" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#15575f"/>
+      <stop offset="1" stop-color="#0d4046"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e9edf0"/>
+      <stop offset="0.5" stop-color="#b9c2c9"/>
+      <stop offset="1" stop-color="#8e99a2"/>
+    </linearGradient>
+    <g id="forceps">
+      <rect x="-4" y="0" width="8" height="78" rx="4" fill="url(#steel)" stroke="#6c767e" stroke-width="1"/>
+      <rect x="-4" y="40" width="8" height="30" fill="none" stroke="#6c767e" stroke-width="0.6"/>
+      <circle cx="-9" cy="92" r="9" fill="none" stroke="url(#steel)" stroke-width="5"/>
+      <circle cx="9" cy="92" r="9" fill="none" stroke="url(#steel)" stroke-width="5"/>
+    </g>
+    <g id="scalpel">
+      <rect x="-5" y="18" width="10" height="70" rx="3" fill="url(#steel)" stroke="#6c767e" stroke-width="1"/>
+      <path d="M-5 18 L7 2 L7 18 Z" fill="url(#steel)" stroke="#6c767e" stroke-width="1"/>
+    </g>
+    <g id="scissors">
+      <line x1="0" y1="20" x2="-8" y2="74" stroke="url(#steel)" stroke-width="6" stroke-linecap="round"/>
+      <line x1="0" y1="20" x2="8" y2="74" stroke="url(#steel)" stroke-width="6" stroke-linecap="round"/>
+      <path d="M-4 8 L4 32 M4 8 L-4 32" stroke="url(#steel)" stroke-width="5" stroke-linecap="round"/>
+      <circle cx="-8" cy="82" r="8" fill="none" stroke="url(#steel)" stroke-width="5"/>
+      <circle cx="8" cy="82" r="8" fill="none" stroke="url(#steel)" stroke-width="5"/>
+    </g>
+  </defs>
+
+  <rect width="640" height="400" rx="18" fill="url(#mat)"/>
+  <rect x="14" y="14" width="612" height="372" rx="12" fill="none" stroke="#2c7781" stroke-width="2" opacity="0.6"/>
+  <g opacity="0.12" stroke="#ffffff" stroke-width="1">
+    <line x1="0" y1="100" x2="640" y2="100"/><line x1="0" y1="200" x2="640" y2="200"/><line x1="0" y1="300" x2="640" y2="300"/>
+  </g>
+
+  <!-- six artery forceps, two rows -->
+  <use href="#forceps" x="80" y="60"/>
+  <use href="#forceps" x="150" y="60"/>
+  <use href="#forceps" x="220" y="60"/>
+  <use href="#forceps" x="80" y="230"/>
+  <use href="#forceps" x="150" y="230"/>
+  <use href="#forceps" x="220" y="230"/>
+
+  <!-- two scalpel handles -->
+  <use href="#scalpel" x="360" y="70"/>
+  <use href="#scalpel" x="400" y="70"/>
+
+  <!-- scissors -->
+  <use href="#scissors" x="470" y="70"/>
+
+  <!-- swab stack -->
+  <g transform="translate(360,250)">
+    <rect x="0" y="0" width="120" height="70" rx="8" fill="#f4f1e9" stroke="#cdc6b4" stroke-width="2"/>
+    <rect x="10" y="10" width="120" height="70" rx="8" fill="#f8f5ee" stroke="#cdc6b4" stroke-width="2"/>
+    <line x1="22" y1="30" x2="130" y2="30" stroke="#dfd8c6" stroke-width="2"/>
+    <line x1="22" y1="45" x2="130" y2="45" stroke="#dfd8c6" stroke-width="2"/>
+    <line x1="22" y1="60" x2="130" y2="60" stroke="#dfd8c6" stroke-width="2"/>
+  </g>
+</svg>
