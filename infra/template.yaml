@@ -290,8 +290,8 @@ Resources:
       Timeout: 29
       Description: Dashboard API (HTTP API + Cognito)
       Events:
-        Proxy: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /{proxy+}, Method: ANY}}
-        Preflight: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: /{proxy+}, Method: OPTIONS, Auth: {Authorizer: NONE}}}
+        Proxy: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: "/{proxy+}", Method: ANY}}
+        Preflight: {Type: HttpApi, Properties: {ApiId: !Ref HttpApi, Path: "/{proxy+}", Method: OPTIONS, Auth: {Authorizer: NONE}}}
       Policies:
         - Statement: [{Effect: Allow, Action: ["social-messaging:SendWhatsAppMessage", "social-messaging:PostWhatsAppMessageMedia"], Resource: !Sub "arn:aws:social-messaging:${AWS::Region}:${AWS::AccountId}:phone-number-id/*"}]
         - Statement: [{Effect: Allow, Action: ["ses:SendEmail", "ses:SendRawEmail"], Resource: !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/*"}]

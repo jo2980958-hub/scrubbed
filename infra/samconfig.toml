@@ -1,0 +1,20 @@
+version = 0.1
+
+[default.global.parameters]
+stack_name = "scrubbed"
+region = "us-east-1"
+
+[default.build.parameters]
+cached = false
+parallel = true
+
+[default.validate.parameters]
+lint = false
+
+[default.deploy.parameters]
+region = "us-east-1"
+capabilities = "CAPABILITY_IAM"
+resolve_s3 = true
+confirm_changeset = false
+fail_on_empty_changeset = false
+parameter_overrides = "SendMode=dry"
