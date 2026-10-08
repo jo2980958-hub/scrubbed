@@ -22,7 +22,11 @@ INTENTS = ["confirm", "question", "cannot_attend", "reports_problem", "other"]
 # safety.DANGER_SIGNS and nothing invented slips through.
 _DANGER_SET = set(engine.DANGER_SIGNS)
 
-_SAFE_DEFAULT = {"intent": "other", "dangerSigns": [], "escalate": False, "confidence": 0.0}
+# When the classifier cannot run or returns nothing usable, we cannot tell a benign reply
+# from a danger sign. In a safety product that fails CLOSED: escalate to the team and let
+# a human read the original message, rather than silently deciding "no escalation".
+_FAILED = {"intent": "other", "dangerSigns": [], "escalate": True, "confidence": 0.0,
+           "classifierError": True}
 
 CLASSIFY_TOOL = {"toolSpec": {
     "name": "classify_reply",
@@ -68,8 +72,8 @@ def classify_reply(text: str, context: Optional[dict] = None) -> dict:
     """Return {"intent": str, "dangerSigns": [str], "escalate": bool, "confidence": float}.
 
     escalate is True when the reply describes any danger sign, or the intent is
-    reports_problem. On any bad or missing model result the safe default is returned
-    (intent "other", no danger signs, no escalation).
+    reports_problem. On any model error or unusable result we FAIL CLOSED: escalate so a
+    human reads the message, rather than silently deciding not to.
     """
     ctx = ""
     if context:
@@ -89,10 +93,10 @@ def classify_reply(text: str, context: Optional[dict] = None) -> dict:
             [{"text": f"{ctx}Patient reply: {text!r}"}],
             CLASSIFY_TOOL, max_tokens=300)
     except Exception:
-        return dict(_SAFE_DEFAULT)
+        return dict(_FAILED)
 
     if not isinstance(raw, dict):
-        return dict(_SAFE_DEFAULT)
+        return dict(_FAILED)
 
     intent = raw.get("intent")
     if intent not in INTENTS:

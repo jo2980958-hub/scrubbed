@@ -24,23 +24,38 @@ MEDIA_BUCKET = os.environ.get("MEDIA_BUCKET", "")
 
 
 def parse_sns_event(event):
+    """Yield one normalised item per inbound message/status. Every layer is guarded: a
+    single malformed record or message is logged and skipped, so one bad payload cannot
+    drop the rest of the batch (and with it a real danger-sign reply arriving alongside)."""
     for rec in event.get("Records", []):
-        outer = json.loads(rec["Sns"]["Message"])
-        entry = outer.get("whatsAppWebhookEntry")
-        entry = json.loads(entry) if isinstance(entry, str) else entry
+        try:
+            outer = json.loads(rec["Sns"]["Message"])
+            entry = outer.get("whatsAppWebhookEntry")
+            entry = json.loads(entry) if isinstance(entry, str) else entry
+        except (KeyError, TypeError, ValueError):
+            log.warning("skipping unparseable SNS record")
+            continue
         for ch in (entry or {}).get("changes", []):
-            v = ch.get("value", {})
-            for m in v.get("messages", []):
-                kind = m.get("type")
-                media = m.get(kind) if kind in ("image", "document", "audio") else None
-                yield {"kind": "message", "from": m["from"], "wamid": m["id"], "type": kind,
-                       "text": (m.get("text") or {}).get("body") or (media or {}).get("caption"),
-                       "media_id": (media or {}).get("id"), "mime": (media or {}).get("mime_type"),
-                       "interactive": wa_inbound.extract_interactive(m),
-                       "ts": int(m["timestamp"]), "aws_message_id": outer.get("messageId")}
-            for s in v.get("statuses", []):
-                yield {"kind": "status", "wamid": s["id"], "status": s["status"],
-                       "to": s.get("recipient_id"), "ts": int(s["timestamp"])}
+            v = ch.get("value", {}) or {}
+            for m in v.get("messages", []) or []:
+                try:
+                    kind = m.get("type")
+                    media = m.get(kind) if kind in ("image", "document", "audio") else None
+                    yield {"kind": "message", "from": m["from"], "wamid": m["id"], "type": kind,
+                           "text": (m.get("text") or {}).get("body") or (media or {}).get("caption"),
+                           "media_id": (media or {}).get("id"), "mime": (media or {}).get("mime_type"),
+                           "interactive": wa_inbound.extract_interactive(m),
+                           "ts": int(m["timestamp"]), "aws_message_id": outer.get("messageId")}
+                except (KeyError, TypeError, ValueError):
+                    log.warning("skipping malformed inbound message")
+                    continue
+            for s in v.get("statuses", []) or []:
+                try:
+                    yield {"kind": "status", "wamid": s["id"], "status": s["status"],
+                           "to": s.get("recipient_id"), "ts": int(s["timestamp"])}
+                except (KeyError, TypeError, ValueError):
+                    log.warning("skipping malformed status")
+                    continue
 
 
 def _send(to: str, replies) -> list:

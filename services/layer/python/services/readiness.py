@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from agent import classify
-from common import cds, db
+from common import cds, config, db, documents
 from safety import engine
 from wa import messages
 
@@ -167,6 +167,44 @@ def not_ready_sweep(hospital_id: Optional[str] = None) -> list[dict]:
     return at_risk
 
 
+def email_worklists() -> int:
+    """Email each hospital's coordinators the day's not-ready worklist as a PDF over SES.
+    Called by the scheduler tick. Returns how many emails were sent (zero when nothing is
+    at risk or no coordinator has an email on file)."""
+    at_risk = not_ready_sweep()
+    if not at_risk:
+        return 0
+
+    by_hospital: dict = {}
+    for case in at_risk:
+        by_hospital.setdefault(case.get("hospitalId") or "", []).append(case)
+
+    sent = 0
+    for hospital_id, cases in by_hospital.items():
+        if not hospital_id:
+            continue
+        coordinators = [s for s in db.list_staff(hospital_id)
+                        if s.get("email") and any(w in (s.get("role") or "").lower()
+                                                  for w in ("coordinator", "charge", "admin"))]
+        if not coordinators:
+            continue
+        pdf = documents.worklist_pdf({"name": hospital_id, "hospitalId": hospital_id}, cases)
+        high = sum(1 for c in cases if c.get("risk") == "high")
+        body = (f"{len(cases)} case(s) need attention before theatre today"
+                + (f", {high} at high risk" if high else "") + ".\n\n"
+                "The attached worklist lists each one and what is still outstanding. "
+                f"Open {config.BRAND} to action them.")
+        for coord in coordinators:
+            cds.send_email(
+                to=coord["email"],
+                subject=f"{config.BRAND}: {len(cases)} case(s) at risk today",
+                body=body,
+                attachment={"filename": "worklist.pdf", "content": pdf,
+                            "content_type": "application/pdf"})
+            sent += 1
+    return sent
+
+
 def send_followup(case_id: str) -> dict:
     """Send the post-op check-in. It asks how they feel and lists nothing clinical; a reply
     is classified and escalated by handle_patient_reply. Returns a result dict."""
@@ -192,62 +230,136 @@ def send_followup(case_id: str) -> dict:
     return {"caseId": case_id, "to": number, "messageId": message_id}
 
 
-def _escalate_to_team(case: dict, patient: Optional[dict], result: dict) -> None:
-    """Flag a danger sign or a reported problem to the surgeon and on the case timeline.
-    We name what was seen; we never add a judgement."""
-    case_id = case["caseId"]
-    signs = result.get("dangerSigns") or []
+def _phase_for(case: Optional[dict]) -> str:
+    """Pre-op before the scheduled time, post-op after it. Unknown time -> post-op (the
+    conservative default: a post-op check-in treats worries as danger signs)."""
+    hours = _hours_to_surgery(case)
+    if hours is None:
+        return "post-op"
+    return "pre-op" if hours > 0 else "post-op"
+
+
+def _should_notify(result: dict) -> bool:
+    """When a patient reply needs a human pushed to, not just recorded: any escalation, a
+    stated inability to attend, or a question."""
+    return bool(result.get("escalate")) or result.get("intent") in ("cannot_attend", "question")
+
+
+def _clinicians_for(case: Optional[dict], patient: Optional[dict]) -> list[dict]:
+    """Who to push a patient escalation to, best first: the case surgeon, then the rest of
+    the case team, then any clinician or coordinator at the hospital. De-duplicated, each
+    with a WhatsApp number, so a missing surgeon number falls back rather than dropping."""
+    seen: set = set()
+    out: list[dict] = []
+
+    def add(member: Optional[dict]) -> None:
+        number = (member or {}).get("whatsappNumber")
+        if number and number not in seen:
+            seen.add(number)
+            out.append(member)
+
+    if case:
+        if case.get("surgeonId"):
+            add(db.get_staff(case["surgeonId"]))
+        for sid in case.get("team") or []:
+            add(db.get_staff(sid))
+
+    hospital_id = (case or {}).get("hospitalId") or (patient or {}).get("hospitalId")
+    if hospital_id:
+        def rank(member: dict) -> int:
+            role = (member.get("role") or "").lower()
+            if "surgeon" in role:
+                return 0
+            if "coordinator" in role or "charge" in role or "admin" in role:
+                return 1
+            return 2
+        for member in sorted(db.list_staff(hospital_id), key=rank):
+            add(member)
+    return out
+
+
+def _notify_team(case: Optional[dict], patient: Optional[dict], result: dict) -> bool:
+    """Push a patient's escalation, absence or question to the responsible clinician.
+    Returns True only if a clinician was actually messaged. Always records the attempt (and
+    whether it was delivered) on the case timeline, so an undelivered escalation is
+    auditable for a coordinator to chase, never silently dropped. Names what was seen; adds
+    no judgement."""
     who = (patient or {}).get("name") or "the patient"
-    if signs:
-        detail_line = "reports: " + "; ".join(signs)
-    else:
-        detail_line = "reports a problem in a post-op reply"
-    db.add_event(case_id, "danger_sign_escalated", actor="system",
-                 detail={"intent": result.get("intent"), "dangerSigns": signs,
-                         "patientId": (patient or {}).get("patientId")})
-
-    surgeon = db.get_staff(case.get("surgeonId")) if case.get("surgeonId") else None
-    number = (surgeon or {}).get("whatsappNumber")
-    if not number:
-        return
-    procedure = case.get("procedure") or "the case"
-    body = (f"Follow-up flag for {procedure}: {who} {detail_line}. "
-            "Please review and contact the patient. This is a flag, not an assessment.")
-    message_id = cds.send_whatsapp_text(number, body)
-    db.add_message(number, "out", message_id, body=body, kind="danger_sign_escalation")
-    db.add_event(case_id, "surgeon_notified", actor="system",
-                 detail={"to": number, "messageId": message_id})
-
-
-def _acknowledgement(result: dict) -> str:
-    """The patient-facing acknowledgement. It confirms we heard them and passes it on. It
-    never diagnoses and never reassures."""
+    signs = result.get("dangerSigns") or []
+    intent = result.get("intent")
     if result.get("escalate"):
-        return ("Thanks, I've let the team know and they will be in touch. "
-                "If this is an emergency, call your hospital or emergency services.")
+        if signs:
+            line = "reports: " + "; ".join(signs)
+        elif result.get("classifierError"):
+            line = "sent a reply the assistant could not read automatically; please read it"
+        else:
+            line = "reports a problem in a message"
+        event_type, subject = "danger_sign_escalated", "Follow-up flag"
+    elif intent == "cannot_attend":
+        line, event_type, subject = "says they cannot attend", "patient_cannot_attend", "Patient message"
+    else:
+        line, event_type, subject = "has a question", "patient_question", "Patient message"
+
+    procedure = (case or {}).get("procedure") or "their case"
+    body = (f"{subject} for {procedure}: {who} {line}. "
+            "Please review and contact the patient. This is a flag, not an assessment.")
+
+    delivered_to = None
+    recipients = _clinicians_for(case, patient)
+    if recipients:
+        number = recipients[0]["whatsappNumber"]
+        message_id = cds.send_whatsapp_text(number, body)
+        db.add_message(number, "out", message_id, body=body, kind="patient_escalation")
+        delivered_to = number
+
+    if case:
+        db.add_event(case["caseId"], event_type, actor="system",
+                     detail={"intent": intent, "dangerSigns": signs,
+                             "patientId": (patient or {}).get("patientId"),
+                             "notifiedNumber": delivered_to, "delivered": bool(delivered_to)})
+    return bool(delivered_to)
+
+
+def _acknowledgement(result: dict, notified: bool) -> str:
+    """The patient-facing acknowledgement. It confirms we heard them and says truthfully
+    what happened next. It never diagnoses and never reassures, and it never claims the
+    team was told when no clinician could be reached."""
+    if result.get("escalate"):
+        if notified:
+            return ("Thanks, I've let the team know and they will be in touch. "
+                    "If this is an emergency, call your hospital or emergency services.")
+        return ("Thanks for telling me. I couldn't reach your care team automatically just now, "
+                "so please call your hospital now. If this is an emergency, call emergency services.")
     intent = result.get("intent")
     if intent == "cannot_attend":
-        return ("Thanks for letting us know. I've told the team you cannot attend and they "
-                "will be in touch.")
+        if notified:
+            return ("Thanks for letting us know. I've told the team you cannot attend and they "
+                    "will be in touch.")
+        return ("Thanks for letting us know. Please also call your hospital to confirm, "
+                "as I couldn't reach the team automatically.")
     if intent == "question":
-        return ("Thanks for your message. I've passed your question to the team and they "
-                "will get back to you.")
+        if notified:
+            return ("Thanks for your message. I've passed your question to the team and they "
+                    "will get back to you.")
+        return ("Thanks for your message. Please call your hospital with your question, "
+                "as I couldn't reach the team automatically.")
     if intent == "confirm":
-        return "Thanks, noted. The team has your message."
-    return "Thanks, I've passed your message to the team."
+        return "Thanks, noted. The team can see your message."
+    return "Thanks, I've noted your message for the team."
 
 
 def handle_patient_reply(number: str, text: str) -> list[dict]:
-    """A patient's inbound reply: record it, classify it, escalate a danger sign or a
-    reported problem to the team, and return the acknowledgement(s) to send back.
+    """A patient's inbound reply: record it, classify it, push a danger sign / problem /
+    absence / question to a clinician, and return the acknowledgement(s) to send back.
 
     Returns a list of wa.messages builder dicts (the webhook sends and records them). The
-    reply only acknowledges; it never diagnoses and never reassures.
+    reply only acknowledges; it never diagnoses, never reassures, and only claims the team
+    was told when a clinician was actually reached.
     """
     patient = db.get_patient_by_whatsapp(number)
     case = _current_case_for_patient(patient)
 
-    context = {"phase": "post-op"}
+    context = {"phase": _phase_for(case)}
     if case and case.get("procedure"):
         context["procedure"] = case["procedure"]
     result = classify.classify_reply(text, context)
@@ -255,13 +367,14 @@ def handle_patient_reply(number: str, text: str) -> list[dict]:
     db.add_message(number, "in", db.new_id(), body=text,
                    kind="patient_reply", intent=result.get("intent"),
                    escalate=result.get("escalate"))
+
+    notified = _notify_team(case, patient, result) if _should_notify(result) else False
+
     if case:
         db.add_event(case["caseId"], "patient_reply", actor="patient",
                      detail={"intent": result.get("intent"),
                              "dangerSigns": result.get("dangerSigns"),
                              "escalate": result.get("escalate"),
-                             "confidence": result.get("confidence")})
-        if result.get("escalate"):
-            _escalate_to_team(case, patient, result)
+                             "confidence": result.get("confidence"), "notified": notified})
 
-    return [messages.text(_acknowledgement(result))]
+    return [messages.text(_acknowledgement(result, notified))]

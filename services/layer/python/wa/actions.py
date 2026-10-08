@@ -64,8 +64,24 @@ def page_team(staff: dict, case_id: str, body: Optional[str] = None, urgent: boo
 
 
 def acknowledge(staff: dict, page_id: str) -> dict:
-    """Record this staff member's acknowledgement of a page and cancel their escalation."""
-    paging.on_acknowledge(page_id, staff.get("whatsappNumber", ""))
+    """Record this staff member's acknowledgement of a page and cancel their escalation.
+
+    Only a recipient of the page may acknowledge it: the staff member's own WhatsApp number
+    has to match a recipient row. That check also keeps the write inside the hospital that
+    was paged, so a tapped foreign pageId can never pollute another case's ladder."""
+    return acknowledge_by_number(staff.get("whatsappNumber", ""), page_id)
+
+
+def acknowledge_by_number(number: str, page_id: str) -> dict:
+    """Acknowledge by WhatsApp number. Used by the in-app tap and by a recipient who taps
+    Acknowledge without being logged into the staff app. Verifies the number is an actual
+    recipient of the page first, so a stray or foreign pageId is a silent no-op rather than
+    an injected recipient row and audit event."""
+    if not number or not page_id:
+        return messages.text("That page could not be acknowledged.")
+    if not db.is_page_recipient(page_id, number):
+        return messages.text("I couldn't find that page for this number.")
+    paging.on_acknowledge(page_id, number)
     return messages.text("Thanks, acknowledged.")
 
 
@@ -114,7 +130,9 @@ def ingest_tray_photo(case_id: str, phase: str, media: dict) -> dict:
 
     Called from the webhook once a tray photo lands, so there is no staff context here;
     the case was already resolved from the sender. No login/money is rendered."""
-    media_id = media.get("id") or media.get("mediaId")
+    # The webhook hands the media over as "media_id"; the in-app/test paths use "id"/
+    # "mediaId". Accept all three so the photo is actually fetched on every path.
+    media_id = media.get("media_id") or media.get("id") or media.get("mediaId")
     mime = media.get("mime") or media.get("mimeType") or "image/jpeg"
     bucket = media.get("bucket") or os.environ.get("MEDIA_BUCKET", "")
     key = media.get("key") or f"inbound/trays/{case_id}/{phase}/{media_id or 'photo'}"
@@ -122,6 +140,17 @@ def ingest_tray_photo(case_id: str, phase: str, media: dict) -> dict:
     cds.fetch_whatsapp_media(media_id, bucket, key)
     image = cds.read_s3(bucket, key)
     catalogue = vision.catalogue_tray(image, mime)
+
+    # A second count stays silent on a failed read. An empty catalogue means "could not
+    # read the photo", not "zero instruments" - storing {} as a real count would make the
+    # other phase diff every item as unaccounted-for (a false escalation), or, if both
+    # photos fail, report a false all-clear. So never store an empty catalogue; re-prompt.
+    if not catalogue.get("items"):
+        note = catalogue.get("notes") or "I couldn't read the tray clearly"
+        return messages.text(
+            f"I couldn't read the {phase} tray photo clearly ({note}). "
+            f"Please send a clearer, straight-on photo for the {phase} count. {_SECOND_COUNT}")
+
     db.set_tray_catalogue(case_id, phase, catalogue["items"], media.get("key") or key)
 
     counted = sum(catalogue["items"].values())
@@ -129,7 +158,8 @@ def ingest_tray_photo(case_id: str, phase: str, media: dict) -> dict:
     before = (tray.get("before") or {}).get("catalogue")
     after = (tray.get("after") or {}).get("catalogue")
 
-    if not (isinstance(before, dict) and isinstance(after, dict)):
+    # Both phases must be present AND non-empty to run the second count.
+    if not (isinstance(before, dict) and before and isinstance(after, dict) and after):
         other = _OTHER_PHASE.get(phase, "other")
         return messages.text(
             f"{phase.capitalize()} tray recorded, {counted} instruments counted. "

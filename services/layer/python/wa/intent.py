@@ -72,22 +72,34 @@ SYSTEM = (
     "instruments, and never confirm a readiness fact that is not in the context."
 )
 
-_ITEMS = ("consent", "fasting", "balance", "instructions")
+# The short words the model is told to use, mapped to the engine's canonical readiness
+# keys (safety.engine.READINESS_ITEMS). The NL path writes through db.set_readiness_item,
+# so it must store the exact engine key or engine.readiness() never reads it back.
+_ITEM_KEYS = {
+    "consent": "consent",
+    "fasting": "fasting_confirmed",
+    "balance": "balance_cleared",
+    "instructions": "instructions_sent",
+    "team": "team_confirmed",
+    "site": "site_marked",
+}
 
 
 def _readiness_item(raw: Optional[str]) -> Optional[str]:
     f = (raw or "").lower()
-    for item in _ITEMS:
-        if item in f:
-            return item
+    for word, key in _ITEM_KEYS.items():
+        if word in f:
+            return key
     if "fast" in f or "nil by mouth" in f or "nbm" in f:
-        return "fasting"
+        return "fasting_confirmed"
     if "consent" in f or "sign" in f:
         return "consent"
     if "pay" in f or "fund" in f or "balance" in f or "deposit" in f:
-        return "balance"
+        return "balance_cleared"
     if "instruct" in f or "arrival" in f:
-        return "instructions"
+        return "instructions_sent"
+    if "mark" in f:
+        return "site_marked"
     return None
 
 

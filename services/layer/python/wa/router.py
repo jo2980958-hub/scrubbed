@@ -178,7 +178,12 @@ def _dispatch(wa_number: str, staff: dict, tap_id: str) -> list[dict]:
 
 
 def _unauthed(wa_number: str, state: str, text, tap_id) -> list[dict]:
-    key, _, _ = (tap_id or "").partition(":")
+    key, _, rest = (tap_id or "").partition(":")
+    # A paged recipient can acknowledge without being logged into the staff app. The
+    # Acknowledge button carries the pageId; acknowledge_by_number verifies the sender is a
+    # recipient of that page before writing, so this opens no unauthenticated write path.
+    if key == "ack" and rest:
+        return _as_list(actions.acknowledge_by_number(wa_number, rest))
     if state == session.AWAITING_EMAIL:
         if text:
             return _as_list(auth.submit_email(wa_number, text.strip()))

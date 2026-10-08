@@ -196,12 +196,23 @@ def test_page_team_guard(other_surgeon, one_case):
     assert isinstance(reply, list) and "not found" in reply[0]["text"]["body"]
 
 
-def test_acknowledge_calls_the_service(monkeypatch, surgeon):
+def test_acknowledge_requires_being_a_recipient(monkeypatch, surgeon, one_case):
     calls = []
     monkeypatch.setattr(paging, "on_acknowledge", lambda pid, num: calls.append((pid, num)))
-    reply = actions.acknowledge(surgeon, "page-123")
-    assert calls == [("page-123", surgeon["whatsappNumber"])]
+
+    # A page the surgeon was actually sent: a real recipient row exists.
+    page = db.create_page(one_case["caseId"], surgeon["staffId"], "Confirm please")
+    db.add_page_recipient(page["pageId"], surgeon["staffId"], surgeon["whatsappNumber"])
+    reply = actions.acknowledge(surgeon, page["pageId"])
+    assert calls == [(page["pageId"], surgeon["whatsappNumber"])]
     assert reply["text"]["body"] == "Thanks, acknowledged."
+
+    # A page the surgeon is not a recipient of (stray or foreign pageId) is refused with no
+    # write to the ladder - the old pass-through would have injected a recipient row.
+    calls.clear()
+    reply = actions.acknowledge(surgeon, "page-not-mine")
+    assert calls == []
+    assert "couldn't find that page" in reply["text"]["body"].lower()
 
 
 # ── set_readiness ────────────────────────────────────────────────────────────

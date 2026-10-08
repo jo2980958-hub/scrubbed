@@ -49,10 +49,3 @@ TBL_FORMS = f"{APP_SLUG}-forms"                # uploaded forms filed against a 
 TBL_EVENTS = f"{APP_SLUG}-events"              # audit timeline
 TBL_CONVERSATIONS = f"{APP_SLUG}-conversations"  # every message in/out, per person, timestamped
 TBL_WA_SESSIONS = f"{APP_SLUG}-wa-sessions"    # staff WhatsApp login/link + nav state
-
-
-def gbp(pence: int) -> str:
-    """Render integer pence as a £ string (patient balances)."""
-    sign = "-" if pence < 0 else ""
-    p = abs(int(pence))
-    return f"{sign}£{p // 100:,}.{p % 100:02d}"

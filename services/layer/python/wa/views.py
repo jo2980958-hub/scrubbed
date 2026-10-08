@@ -111,7 +111,7 @@ def _ticked_indexes(case_id: str, phase: str) -> set:
 def my_list(staff: dict, when: str = "today") -> dict:
     """A surgeon's own list, or the hospital's board for everyone else, for one day."""
     day = _day_for(when)
-    if staff.get("role") == "surgeon":
+    if "surgeon" in (staff.get("role") or "").lower():
         cases = db.list_cases_for_surgeon(staff["staffId"], day)
     else:
         cases = db.list_cases(staff.get("hospitalId"), day)
@@ -268,7 +268,7 @@ def paging_status(staff: dict, case_id: str) -> dict:
             bits.append("read")
         if person.get("acknowledgedAt"):
             bits.append("acknowledged")
-        if person.get("escalated"):
+        if person.get("status") == "escalated" or person.get("escalatedAt"):
             bits.append("escalated to a call")
         lines.append(f"- {name}: {', '.join(bits)}")
     return messages.text("\n".join(lines))

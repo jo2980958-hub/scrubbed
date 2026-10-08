@@ -35,6 +35,39 @@ def _staff(event):
     return db.get_staff_by_email(email) if email else None
 
 
+# Only these case fields may be set from the client; hospitalId is always stamped from the
+# caller's own record, never taken from the body.
+_CASE_CREATE_FIELDS = {"surgeonId", "patientId", "procedure", "procedureCode", "theatre",
+                       "scheduledAt", "team", "status", "followupDueAt"}
+_CASE_UPDATE_FIELDS = {"surgeonId", "patientId", "procedure", "procedureCode", "theatre",
+                       "scheduledAt", "team", "status"}
+
+
+def _patient_scoped(patient_id, hosp):
+    """A patient only when they belong to the caller's hospital. Case ownership is checked
+    separately; this stops a case pointing its patientId at another hospital's patient and
+    leaking that patient's name and number back through the case detail or conversations."""
+    p = db.get_patient(patient_id) if patient_id else None
+    return p if p and p.get("hospitalId") == hosp else None
+
+
+def _refs_in_hospital(data: dict, hosp: str) -> bool:
+    """A client-supplied patientId / team must belong to the caller's own hospital."""
+    pid = data.get("patientId")
+    if pid and not _patient_scoped(pid, hosp):
+        return False
+    for sid in data.get("team") or []:
+        member = db.get_staff(sid)
+        if member and member.get("hospitalId") != hosp:
+            return False
+    return True
+
+
+def _can_manage_staff(staff: dict) -> bool:
+    role = (staff.get("role") or "").lower()
+    return any(word in role for word in ("coordinator", "charge", "admin"))
+
+
 def _case_summary(c: dict) -> dict:
     return {"caseId": c["caseId"], "procedure": c.get("procedure"), "theatre": c.get("theatre"),
             "scheduledAt": c.get("scheduledAt"), "surgeonId": c.get("surgeonId"),
@@ -51,7 +84,7 @@ def _team(case: dict) -> list:
 
 
 def _case_full(case: dict) -> dict:
-    patient = db.get_patient(case.get("patientId")) if case.get("patientId") else None
+    patient = _patient_scoped(case.get("patientId"), case.get("hospitalId"))
     return {"case": case, "team": _team(case), "patient": patient,
             "readiness": readiness.case_readiness(case["caseId"]),
             "tray": db.get_tray(case["caseId"])}
@@ -66,7 +99,9 @@ def _pages(case_id: str) -> list:
             recips.append({"name": (s or {}).get("name"), "role": (s or {}).get("role"),
                            "status": r.get("status"), "sentAt": r.get("sentAt"),
                            "deliveredAt": r.get("deliveredAt"), "readAt": r.get("readAt"),
-                           "acknowledgedAt": r.get("acknowledgedAt"), "escalated": r.get("escalated")})
+                           "acknowledgedAt": r.get("acknowledgedAt"),
+                           "escalatedAt": r.get("escalatedAt"),
+                           "escalated": r.get("status") == "escalated" or bool(r.get("escalatedAt"))})
         out.append({"pageId": page["pageId"], "body": page.get("body"),
                     "createdAt": page.get("createdAt"), "urgent": page.get("urgent"),
                     "recipients": recips})
@@ -75,7 +110,7 @@ def _pages(case_id: str) -> list:
 
 def _conversations(case: dict) -> list:
     numbers = []
-    patient = db.get_patient(case.get("patientId")) if case.get("patientId") else None
+    patient = _patient_scoped(case.get("patientId"), case.get("hospitalId"))
     if patient and patient.get("whatsappNumber"):
         numbers.append(patient["whatsappNumber"])
     for sid in case.get("team") or []:
@@ -110,6 +145,8 @@ def handler(event, context=None):
             if method == "GET":
                 return _resp(200, {"staff": db.list_staff(hosp)})
             if method == "POST":
+                if not _can_manage_staff(staff):
+                    return _resp(403, {"message": "Only a coordinator or admin can add staff."})
                 data = json.loads(event.get("body") or "{}")
                 data["hospitalId"] = hosp
                 return _resp(200, {"staff": db.create_staff(data)})
@@ -122,8 +159,11 @@ def handler(event, context=None):
                 day = (event.get("queryStringParameters") or {}).get("day")
                 return _resp(200, {"cases": [_case_summary(c) for c in db.list_cases(hosp, day)]})
             if method == "POST":
-                data = json.loads(event.get("body") or "{}")
+                body = json.loads(event.get("body") or "{}")
+                data = {k: v for k, v in body.items() if k in _CASE_CREATE_FIELDS}
                 data["hospitalId"] = hosp
+                if not _refs_in_hospital(data, hosp):
+                    return _resp(400, {"message": "Patient or team member is not at your hospital."})
                 return _resp(200, {"case": db.create_case(data)})
 
         if parts[:1] == ["cases"] and len(parts) >= 2:
@@ -135,7 +175,11 @@ def handler(event, context=None):
                 if method == "GET":
                     return _resp(200, _case_full(case))
                 if method == "PATCH":
-                    return _resp(200, {"case": db.update_case(case_id, json.loads(event.get("body") or "{}"))})
+                    body = json.loads(event.get("body") or "{}")
+                    fields = {k: v for k, v in body.items() if k in _CASE_UPDATE_FIELDS}
+                    if not _refs_in_hospital(fields, hosp):
+                        return _resp(400, {"message": "Patient or team member is not at your hospital."})
+                    return _resp(200, {"case": db.update_case(case_id, fields)})
             sub = parts[2]
             if sub == "pages" and method == "GET":
                 return _resp(200, {"pages": _pages(case_id)})

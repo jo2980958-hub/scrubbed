@@ -193,11 +193,15 @@ def test_classify_drops_invented_signs_and_clamps_confidence():
     assert r["escalate"] is True
 
 
-def test_classify_is_defensive_on_a_bad_model_result():
-    # Empty queue -> converse_tool raises -> the safe default comes back.
+def test_classify_fails_closed_on_a_bad_model_result():
+    # Empty queue -> converse_tool raises. In a safety product we cannot tell a benign
+    # reply from a danger sign when the model fails, so we FAIL CLOSED: escalate for a
+    # human to read, and mark it a classifier error so the audit shows why.
     llm.set_client(FakeBedrock(tool_inputs=[]))
     r = classify.classify_reply("anything")
-    assert r == {"intent": "other", "dangerSigns": [], "escalate": False, "confidence": 0.0}
+    assert r["escalate"] is True
+    assert r["classifierError"] is True
+    assert r["intent"] == "other" and r["dangerSigns"] == [] and r["confidence"] == 0.0
 
 
 # ── handle_patient_reply ──────────────────────────────────────────────────────

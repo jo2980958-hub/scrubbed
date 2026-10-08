@@ -46,6 +46,23 @@ def wa_id(number: str) -> str:
     return "+" + digits if digits else ""
 
 
+def _red(number: str) -> str:
+    """A log-safe form of a phone number: country prefix + last two digits only. Patient and
+    staff numbers are PHI, so neither the full number nor message bodies go to CloudWatch."""
+    digits = "".join(ch for ch in str(number) if ch.isdigit())
+    if len(digits) <= 4:
+        return "***"
+    return f"+{digits[:2]}***{digits[-2:]}"
+
+
+def _mask_log_email(email: str) -> str:
+    """A log-safe form of an email: first letter of the local part plus the domain."""
+    name, sep, domain = str(email or "").partition("@")
+    if not sep or not name:
+        return "***"
+    return f"{name[0]}***@{domain}"
+
+
 # ── WhatsApp (AWS End User Messaging Social) ──────────────────────────────────
 def send_whatsapp_text(to: str, body: str, reply_to_wamid: Optional[str] = None) -> str:
     """Send a free-form text over the WABA. Only valid inside the 24h customer-service
@@ -60,7 +77,7 @@ def send_whatsapp_text(to: str, body: str, reply_to_wamid: Optional[str] = None)
     if reply_to_wamid:
         msg["context"] = {"message_id": reply_to_wamid}
     if not live():
-        log.info("DRY-RUN whatsapp to=%s body=%s", msg["to"], body)
+        log.info("DRY-RUN whatsapp to=%s text (%d chars)", _red(to), len(body or ""))
         return f"dry-run-{uuid.uuid4().hex[:12]}"
     resp = client("socialmessaging").send_whatsapp_message(
         originationPhoneNumberId=config.ORIGINATION_PHONE_NUMBER_ID,
@@ -77,7 +94,7 @@ def send_whatsapp_raw(to: str, message: dict) -> str:
     msg = {"messaging_product": "whatsapp", "recipient_type": "individual",
            "to": wa_id(to), **message}
     if not live():
-        log.info("DRY-RUN whatsapp(raw) to=%s type=%s", msg["to"], message.get("type"))
+        log.info("DRY-RUN whatsapp(raw) to=%s type=%s", _red(to), message.get("type"))
         return f"dry-run-{uuid.uuid4().hex[:12]}"
     resp = client("socialmessaging").send_whatsapp_message(
         originationPhoneNumberId=config.ORIGINATION_PHONE_NUMBER_ID,
@@ -93,7 +110,7 @@ def send_whatsapp_document(to: str, data: bytes, filename: str, caption: Optiona
     stage it in S3, register it with PostWhatsAppMessageMedia for a media id, then send it.
     Valid only inside the 24h window. Returns the wamid (or a dry-run id when not live)."""
     if not live():
-        log.info("DRY-RUN whatsapp document to=%s file=%s (%d bytes)", wa_id(to), filename, len(data))
+        log.info("DRY-RUN whatsapp document to=%s file=%s (%d bytes)", _red(to), filename, len(data))
         return f"dry-run-{uuid.uuid4().hex[:12]}"
     bucket = bucket or os.environ.get("MEDIA_BUCKET", "")
     key = f"outbound/{uuid.uuid4().hex}/{filename}"
@@ -115,7 +132,7 @@ def send_whatsapp_audio(to: str, data: bytes, caption: Optional[str] = None,
     caption, so if one is given we send it as a short text first. Valid only inside the 24h
     window. Returns the audio wamid (or a dry-run id when SEND_MODE != live)."""
     if not live():
-        log.info("DRY-RUN whatsapp audio to=%s (%d bytes) caption=%s", wa_id(to), len(data), bool(caption))
+        log.info("DRY-RUN whatsapp audio to=%s (%d bytes) caption=%s", _red(to), len(data), bool(caption))
         return f"dry-run-{uuid.uuid4().hex[:12]}"
     bucket = bucket or os.environ.get("MEDIA_BUCKET", "")
     key = f"outbound/{uuid.uuid4().hex}/page.mp3"
@@ -170,7 +187,7 @@ def send_email(to: str, subject: str, body: str, attachment: Optional[dict] = No
     if reply_to:
         params["ReplyToAddresses"] = [reply_to]
     if not live():
-        log.info("DRY-RUN email to=%s subject=%s attachment=%s", to, subject, bool(attachment))
+        log.info("DRY-RUN email to=%s subject=%s attachment=%s", _mask_log_email(to), subject, bool(attachment))
         return f"dry-run-{uuid.uuid4().hex[:12]}"
     return client("sesv2").send_email(**params)["MessageId"]
 
@@ -179,7 +196,13 @@ def send_email(to: str, subject: str, body: str, attachment: Optional[dict] = No
 def synth_mp3(text: str, voice_id: Optional[str] = None) -> bytes:
     """Synthesise `text` to MP3 bytes with Amazon Polly (neural). This makes the spoken
     page that goes out as a WhatsApp audio note. `voice_id` is a Polly voice id (title
-    case, e.g. 'Amy'), defaulting to config.VOICE_ID."""
+    case, e.g. 'Amy'), defaulting to config.VOICE_ID.
+
+    Callers synthesise eagerly (``send_whatsapp_audio(n, synth_mp3(body))``), so this has to
+    honour dry-run itself or a demo would bill Polly for audio that is then discarded."""
+    if not live():
+        log.info("DRY-RUN polly synth (%d chars)", len(text or ""))
+        return b""
     resp = client("polly").synthesize_speech(
         Text=text,
         OutputFormat="mp3",

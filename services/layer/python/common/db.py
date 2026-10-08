@@ -6,7 +6,7 @@ set_resource().
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -124,6 +124,17 @@ def normalise_e164(number: str) -> str:
     return f"+{digits}" if digits else ""
 
 
+def _plus_hours(iso: str, hours: float) -> Optional[str]:
+    """ISO time + hours, back as the same stored ISO shape, or None if unparseable."""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (dt + timedelta(hours=hours)).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 # ── domain accessors ──────────────────────────────────────────────────────────
 # A single get-by-id helper keeps the many lookups below short and consistent.
 def _get(tbl: str, key: dict) -> Optional[dict]:
@@ -189,6 +200,13 @@ def create_case(data: dict) -> dict:
         if not data.get(required):
             raise ValueError(f"create_case requires {required}")
     item = {"caseId": new_id(), "status": "scheduled", "createdAt": now_iso(), **data}
+    # Arm the post-op follow-up a few hours after the scheduled time unless the caller set
+    # one. The scheduler sends it once that time passes; without this the follow-up loop
+    # has no producer and never fires.
+    if not item.get("followupDueAt") and item.get("scheduledAt"):
+        due = _plus_hours(item["scheduledAt"], 4)
+        if due:
+            item["followupDueAt"] = due
     return _put(config.TBL_CASES, item)
 
 
@@ -289,10 +307,37 @@ def add_page_recipient(page_id: str, staff_id: str, number: str) -> dict:
     return _put(config.TBL_PAGES, item)
 
 
+# Ladder order. A delivery/read callback can arrive out of order (WhatsApp does not
+# guarantee ordering), so the headline status only ever advances; the per-status
+# timestamp is always stamped so we keep every receipt time.
+_PAGE_LADDER = {"sent": 0, "delivered": 1, "read": 2, "escalated": 3, "acknowledged": 4}
+
+
+def get_page(page_id: str) -> Optional[dict]:
+    """The page's meta row (body, caseId, urgent, createdAt)."""
+    return _get(config.TBL_PAGES, {"pageId": page_id, "sk": "meta"})
+
+
+def is_page_recipient(page_id: str, number: str) -> bool:
+    """True if this number was actually paged for this page. Gate on this before
+    acknowledging, so a stray or foreign pageId cannot inject a recipient row."""
+    num = normalise_e164(number)
+    if not page_id or not num:
+        return False
+    return _get(config.TBL_PAGES, {"pageId": page_id, "sk": f"recip#{num}"}) is not None
+
+
 def record_page_status(page_id: str, number: str, status: str) -> dict:
-    """Move a recipient along the ladder (sent/delivered/read) and stamp the time."""
+    """Move a recipient along the ladder (sent/delivered/read/escalated) and stamp the time.
+    The headline status never regresses: a late 'read' receipt arriving after an
+    acknowledgement (or an escalation) stamps readAt but leaves the recipient acknowledged,
+    so the scheduler does not re-escalate an already-handled page."""
     key = {"pageId": page_id, "sk": f"recip#{normalise_e164(number)}"}
-    return _update(config.TBL_PAGES, key, {"status": status, f"{status}At": now_iso()})
+    current = _get(config.TBL_PAGES, key)
+    fields: dict = {f"{status}At": now_iso()}
+    if _PAGE_LADDER.get(status, 0) >= _PAGE_LADDER.get((current or {}).get("status"), -1):
+        fields["status"] = status
+    return _update(config.TBL_PAGES, key, fields)
 
 
 def acknowledge_page(page_id: str, number: str) -> dict:
@@ -338,8 +383,10 @@ def list_forms_for_case(case_id: str) -> list[dict]:
                       KeyConditionExpression=Key("caseId").eq(case_id))
 
 
-# Events. Audit timeline per case. The sort key is createdAt plus a monotonic
-# counter so two events in the same microsecond still keep their insertion order.
+# Events. Audit timeline per case. The sort key is createdAt plus a per-process counter
+# and a short random suffix: the counter keeps insertion order within one Lambda
+# container, and the random part stops two containers that fire in the same microsecond
+# from colliding on the sort key and overwriting each other's event.
 _event_seq = 0
 
 
@@ -348,7 +395,8 @@ def add_event(case_id: str, type_: str, actor: str = "system",
     global _event_seq
     _event_seq += 1
     created = now_iso()
-    item = {"caseId": case_id, "createdAt#seq": f"{created}#{_event_seq:06d}",
+    sort = f"{created}#{_event_seq:06d}#{uuid.uuid4().hex[:6]}"
+    item = {"caseId": case_id, "createdAt#seq": sort,
             "type": type_, "actor": actor, "detail": detail or {}, "createdAt": created}
     return _put(config.TBL_EVENTS, item)
 

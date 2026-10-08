@@ -58,6 +58,14 @@ def _not_ready_sweep() -> int:
         return 0
 
 
+def _email_worklists() -> int:
+    try:
+        return readiness.email_worklists()
+    except Exception:
+        log.exception("worklist email failed")
+        return 0
+
+
 def _due_followups(now: str) -> int:
     sent = 0
     for case in db._scan_all(config.TBL_CASES):
@@ -79,6 +87,7 @@ def handler(event, context=None):
     result = {
         "escalatedPages": _escalate_overdue_pages(now_dt),
         "atRiskCases": _not_ready_sweep(),
+        "worklistsEmailed": _email_worklists(),
         "followupsSent": _due_followups(now),
     }
     log.info("scheduler tick: %s", result)
