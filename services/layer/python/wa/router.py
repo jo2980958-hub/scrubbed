@@ -161,8 +161,11 @@ def _dispatch(wa_number: str, staff: dict, tap_id: str) -> list[dict]:
                               lambda: actions.send_case_brief_pdf(staff, rest, wa_number))
     if key == "tray":
         case_id, _, phase = rest.partition(":")
-        return _case_dispatch(staff, case_id,
-                              lambda: actions.start_tray_check(staff, case_id, phase))
+        if not _owned(staff, case_id):
+            return [menus.main_menu(staff)]
+        # Arm the next photo to land on this case's tray check for this phase.
+        session.set_context(wa_number, f"awaiting_tray:{case_id}:{phase or 'before'}")
+        return _as_list(actions.start_tray_check(staff, case_id, phase or "before"))
     if key == "ready":
         parts = rest.split(":")
         if len(parts) >= 3:
