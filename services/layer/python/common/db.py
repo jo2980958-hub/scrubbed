@@ -123,5 +123,57 @@ def normalise_e164(number: str) -> str:
     return f"+{digits}" if digits else ""
 
 
-# ── domain accessors (staff, cases, patients, trays, readiness, pages, forms,
-#    events, conversations) are added here by the data-model module. ──────────
+# ── domain accessors (contracts; the data-model module fills the bodies) ──────
+# Staff
+def create_staff(data: dict) -> dict: raise NotImplementedError
+def get_staff(staff_id: str) -> Optional[dict]: raise NotImplementedError
+def get_staff_by_email(email: str) -> Optional[dict]: raise NotImplementedError
+def get_staff_by_whatsapp(number: str) -> Optional[dict]: raise NotImplementedError
+def update_staff(staff_id: str, fields: dict) -> dict: raise NotImplementedError
+def list_staff(hospital_id: Optional[str] = None) -> list[dict]: raise NotImplementedError
+
+# Cases
+def create_case(data: dict) -> dict: raise NotImplementedError
+def get_case(case_id: str) -> Optional[dict]: raise NotImplementedError
+def update_case(case_id: str, fields: dict) -> dict: raise NotImplementedError
+def list_cases(hospital_id: Optional[str] = None, day: Optional[str] = None) -> list[dict]: raise NotImplementedError
+def list_cases_for_surgeon(staff_id: str, day: Optional[str] = None) -> list[dict]: raise NotImplementedError
+
+# Patients
+def create_patient(data: dict) -> dict: raise NotImplementedError
+def get_patient(patient_id: str) -> Optional[dict]: raise NotImplementedError
+def get_patient_by_whatsapp(number: str) -> Optional[dict]: raise NotImplementedError
+def update_patient(patient_id: str, fields: dict) -> dict: raise NotImplementedError
+
+# Trays (instrument catalogues per case: phase 'before'|'after')
+def set_tray_catalogue(case_id: str, phase: str, catalogue: dict, photo_key: Optional[str] = None) -> dict: raise NotImplementedError
+def get_tray(case_id: str) -> Optional[dict]: raise NotImplementedError
+
+# Readiness (per case: item key -> bool)
+def get_readiness(case_id: str) -> dict: raise NotImplementedError
+def set_readiness_item(case_id: str, item: str, value: bool) -> dict: raise NotImplementedError
+
+# Pages (a page to a case's roster; per-recipient delivery/read/ack state)
+def create_page(case_id: str, created_by: str, body: str, urgent: bool = False) -> dict: raise NotImplementedError
+def add_page_recipient(page_id: str, staff_id: str, number: str) -> dict: raise NotImplementedError
+def record_page_status(page_id: str, number: str, status: str) -> dict: raise NotImplementedError  # sent/delivered/read
+def acknowledge_page(page_id: str, number: str) -> dict: raise NotImplementedError
+def list_page_recipients(page_id: str) -> list[dict]: raise NotImplementedError
+def list_pages_for_case(case_id: str) -> list[dict]: raise NotImplementedError
+def pending_page_recipients(page_id: str) -> list[dict]: raise NotImplementedError  # not acknowledged
+
+# Forms (a form sent to a staff member, filled and uploaded back)
+def create_form(case_id: str, staff_id: str, kind: str) -> dict: raise NotImplementedError
+def attach_form_upload(form_id: str, s3_key: str) -> dict: raise NotImplementedError
+def get_form(form_id: str) -> Optional[dict]: raise NotImplementedError
+def list_forms_for_case(case_id: str) -> list[dict]: raise NotImplementedError
+
+# Events (audit timeline per case)
+def add_event(case_id: str, type_: str, actor: str = "system", detail: Optional[dict] = None) -> dict: raise NotImplementedError
+def list_events(case_id: str) -> list[dict]: raise NotImplementedError
+
+# Conversations (every message in/out, per person, timestamped)
+def add_message(number: str, direction: str, message_id: str, body: Optional[str] = None, **extra) -> dict: raise NotImplementedError
+def list_messages(number: str, limit: int = 50) -> list[dict]: raise NotImplementedError
+def record_delivery(message_id: str, status: str) -> Optional[dict]: raise NotImplementedError
+def claim_message(message_id: str, ttl_days: int = 7) -> bool: raise NotImplementedError

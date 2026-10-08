@@ -126,6 +126,28 @@ def _header_band(c: _Canvas, name: str, subtitle: str) -> float:
     return band_bottom - 32
 
 
+def case_brief_pdf(case: dict, team: list, patient: dict) -> bytes:
+    """A one-page case brief: patient, procedure, theatre, time, the team and roles,
+    readiness summary. For the surgeon."""
+    raise NotImplementedError
+
+
+def worklist_pdf(hospital: dict, cases: list) -> bytes:
+    """The coordinator worklist: today's cases, theatre, time, readiness and risk."""
+    raise NotImplementedError
+
+
+def instrument_audit_pdf(case: dict, before: dict, after: dict, diff: dict) -> bytes:
+    """The instrument second-count audit: the before and after catalogues and the diff,
+    with the 'second count, manual WHO count is authoritative' note."""
+    raise NotImplementedError
+
+
+def missed_form_pdf(case: dict, staff: dict, kind: str) -> bytes:
+    """A form sent to a team member who missed a page, to fill and upload back."""
+    raise NotImplementedError
+
+
 def invoice_pdf(business: dict, invoice: dict) -> bytes:
     """A professional invoice: business header, bill-to, line item, a totals box
     (amount, statutory interest and fixed sum when late, total due), bank details,
