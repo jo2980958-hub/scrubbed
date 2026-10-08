@@ -249,7 +249,7 @@ export const seeds: Record<string, Seed> = {
     patient: { name: 'Idris Mahama', balancePence: 24000, dateOfBirth: '1979-07-21', mrn: 'MRN 41204', phone: '+44 7700 900312' },
     checklist: checklist([], undefined, undefined),
     anaesthetic: 'General',
-    notes: 'Self-funded. Consent outstanding — surgeon to see on the ward before 13:00.',
+    notes: 'Self-funded. Consent outstanding. Surgeon to see on the ward before 13:00.',
     tray: null,
   },
 
