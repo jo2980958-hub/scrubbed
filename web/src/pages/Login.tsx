@@ -85,9 +85,7 @@ export default function Login() {
             <p className="muted" style={{ marginTop: 6 }}>
               {challenge
                 ? 'This is your first sign-in. Set a password you will remember.'
-                : DEMO
-                  ? 'You are viewing Scrubbed with sample theatre data. Nothing is sent.'
-                  : 'Sign in to the coordinator dashboard.'}
+                : 'Sign in to the coordinator dashboard.'}
             </p>
           </div>
 
@@ -101,10 +99,10 @@ export default function Login() {
           {DEMO ? (
             <>
               <Button variant="primary" className="block" onClick={() => { auth.enterDemo(); nav('/', { replace: true }); }}>
-                Open the demo
+                Open the dashboard
                 <Icon name="arrowRight" size={16} />
               </Button>
-              <p className="auth-foot">St Aldate’s General · sample theatre list for today.</p>
+              <p className="auth-foot">St Aldate’s General · theatre list for today.</p>
             </>
           ) : challenge ? (
             <>

@@ -33,7 +33,7 @@ export default function CaseBoard() {
       <div className="page-head">
         <div>
           <h1>Case board</h1>
-          <p className="muted">{isToday ? 'Today' : fmtDay(day)} · {list.length} {list.length === 1 ? 'case' : 'cases'} across {theatres.length} {theatres.length === 1 ? 'theatre' : 'theatres'}</p>
+          <p className="muted">{isToday ? 'Today' : fmtDay(day)} · {list.length} {list.length === 1 ? 'case' : 'cases'}</p>
         </div>
         <div className="head-actions">
           <div className="daynav" role="group" aria-label="Choose day">
@@ -47,7 +47,7 @@ export default function CaseBoard() {
 
       {list.length > 0 && (
         <div className="stat-row">
-          <Stat label="Scheduled today" value={list.length} />
+          <Stat label="Theatres" value={theatres.length} />
           <Stat label="Ready" value={ready} tone="ok" />
           <Stat label="At risk" value={atRisk} tone={atRisk > 0 ? 'alert' : undefined} />
         </div>

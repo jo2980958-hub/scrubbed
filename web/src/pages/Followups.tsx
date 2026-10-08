@@ -24,7 +24,7 @@ function Row({ f }: { f: Followup }) {
       <div className="fu-end">
         <FollowupChip status={f.status} />
         <span className="muted fu-due" title={fmtDateTime(f.dueAt)}>
-          {f.status === 'scheduled' ? `Due ${fromNow(f.dueAt)}` : f.status === 'replied' ? `Replied ${fromNow(f.dueAt)}` : `${fromNow(f.dueAt)}`}
+          {f.status === 'scheduled' ? `Due ${fromNow(f.dueAt)}` : f.status === 'replied' ? 'Replied' : `${fromNow(f.dueAt)}`}
         </span>
       </div>
     </li>
